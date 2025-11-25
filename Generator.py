@@ -159,7 +159,7 @@ class HullDesigner:
         self.canvas.bind("<Configure>", self.on_resize)
         self.canvas.bind("<Button-1>", self.add_point)
         self.canvas.bind("<Button-3>", self.remove_point)
-        self.canvas.bind("<Motion>", self.update_cursor)
+        self.canvas.bind("<Motion>", self.cursor_update)
 
     def load_settings(self):
         if os.path.exists(SETTINGS_FILE):
@@ -325,11 +325,29 @@ class HullDesigner:
         self.canvas.create_text(center_x, start_y - 10, text="BOW", fill="#444", font=("Arial", 10, "bold"), tags="grid")
         self.canvas.create_text(center_x, end_y + 10, text="STERN", fill="#444", font=("Arial", 10, "bold"), tags="grid")
 
-    def update_cursor(self, event):
-        gx, gz = self.to_grid(event.x, event.y)
-        width_m, length_m = int(abs(gx)) * 2 + 1, int(abs(gz))
+    def _cursor_to_point(self, sx, sz):
+        raw_gx, raw_gz = self.to_grid(sx, sz)
+        gx = int(round(abs(raw_gx)))
+        gz = int(round(raw_gz))
+        if gz < 0: gz = 0
+        return (gz, gx)
+
+    def cursor_update(self, event):
+        gz, gx = self._cursor_to_point(event.x, event.y)
+
+        # Update Cursor position text
+        width_m, length_m = gx * 2 + 1, gz
         max_places = max(len(str(self.var_limit_length.get())), len(str(self.offset_y)))
         self.lbl_cursor.config(text=f"Width at Cursor: {width_m:0>{max_places}}m\nLength at Cursor: {length_m:0>{max_places}}m")
+
+        # Render line preview
+        self.canvas.delete("preview")
+        if gz > self.points[-1][0]:
+            real_point_pos = self.to_screen(self.points[-1][1], self.points[-1][0])
+            mirror_point_pos = self.to_screen(-self.points[-1][1], self.points[-1][0])
+
+            self.canvas.create_line(real_point_pos, self.to_screen(gx, gz), tags="preview", fill="light grey")
+            self.canvas.create_line(mirror_point_pos, self.to_screen(-gx, gz), tags="preview", fill="light grey")
 
     def update_stats(self):
         if not self.points:
@@ -344,12 +362,9 @@ class HullDesigner:
         self.lbl_stats_beam.config(text=f"Beam: {b}m")
 
     def add_point(self, event):
-        raw_gx, raw_gz = self.to_grid(event.x, event.y)
-        gx = int(round(abs(raw_gx)))
-        gz = int(round(raw_gz))
-        if gz < 0: gz = 0
-        if not self.points or gz > self.points[-1][0]:
-            self.points.append((gz, gx))
+        point = self._cursor_to_point(event.x, event.y)
+        if not self.points or point[0] > self.points[-1][0]:
+            self.points.append(point)
             self.redraw_shape()
             self.update_stats()
             self.check_slope_warning()
