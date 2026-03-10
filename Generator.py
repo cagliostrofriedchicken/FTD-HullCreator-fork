@@ -42,6 +42,7 @@ class HullDesigner:
         self.root.configure(bg=THEME_PANEL_BG)
 
         self.points = [(0, 0)]
+        self.selected_point_index = None  # NEW: Tracks currently selected point
 
         # Defaults
         self.var_height = tk.IntVar(value=3)
@@ -104,8 +105,7 @@ class HullDesigner:
         grp_dim.pack(fill=tk.X, pady=5, padx=5)
 
         tk.Label(grp_dim, text="Material:", **lbl_opts).pack(anchor="w")
-        # Restricted material options per user request
-        mat_options = ["Alloy", "Metal", "Wood", "Heavy", "Stone"]
+        mat_options =["Alloy", "Metal", "Wood", "Heavy", "Stone"]
         self.cbo_mat = ttk.Combobox(grp_dim, textvariable=self.var_material, values=mat_options, state="readonly", width=12)
         self.cbo_mat.pack(pady=2)
 
@@ -119,7 +119,6 @@ class HullDesigner:
         self.var_thickness = tk.IntVar(value=2)
         tk.Label(grp_dim, text="Armor Thickness:", **lbl_opts).pack(anchor="w")
         tk.Spinbox(grp_dim, from_=1, to=5, textvariable=self.var_thickness, width=10).pack(pady=2)
-        # ----------------------------
 
         # --- OUTPUT PATH ---
         grp_path = tk.LabelFrame(self.controls, text="Output Location", bg=THEME_PANEL_BG, font=("MS Sans Serif", 9))
@@ -138,9 +137,14 @@ class HullDesigner:
                                     bg=THEME_PANEL_BG, relief=tk.RAISED, bd=3, font=("MS Sans Serif", 9, "bold"), pady=5)
         self.btn_export.pack(pady=10, fill=tk.X)
 
-        # --- USAGE INSTRUCTIONS
-        self.lbl_info = tk.Label(self.controls, text="L-Click: Add Point\nR-Click: Undo\n\nDraw on either side\nof the center line.",
-                                 justify=tk.LEFT, bg=THEME_PANEL_BG, fg="#444")
+        # --- USAGE INSTRUCTIONS (UPDATED) ---
+        instructions = (
+            "Shift+L-Click: Add Point\n"
+            "L-Click: Select / Drag\n"
+            "Del/Backspace: Delete Point\n"
+            "R-Click: Undo Last"
+        )
+        self.lbl_info = tk.Label(self.controls, text=instructions, justify=tk.LEFT, bg=THEME_PANEL_BG, fg="#444")
         self.lbl_info.pack(pady=15)
 
         # --- WARNING LABEL ---
@@ -153,13 +157,20 @@ class HullDesigner:
         self.canvas_frame = tk.Frame(self.main_container, bg="black", bd=2, relief=tk.SUNKEN)
         self.canvas_frame.pack(side=tk.LEFT, padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-        self.canvas = tk.Canvas(self.canvas_frame, bg=THEME_BG, highlightthickness=0)
+        self.canvas = tk.Canvas(self.canvas_frame, bg=THEME_BG, highlightthickness=0, takefocus=True)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
+        # --- NEW BINDINGS ---
         self.canvas.bind("<Configure>", self.on_resize)
-        self.canvas.bind("<Button-1>", self.add_point)
+        self.canvas.bind("<Shift-Button-1>", self.add_point)
+        self.canvas.bind("<Button-1>", self.select_point)
+        self.canvas.bind("<B1-Motion>", self.move_point)
         self.canvas.bind("<Button-3>", self.remove_point)
         self.canvas.bind("<Motion>", self.cursor_update)
+        
+        # Deletion binds (Bound locally to canvas to avoid conflicts with text boxes)
+        self.canvas.bind("<Delete>", self.delete_selected_point)
+        self.canvas.bind("<BackSpace>", self.delete_selected_point)
 
     def load_settings(self):
         if os.path.exists(SETTINGS_FILE):
@@ -206,7 +217,7 @@ class HullDesigner:
             self.lbl_warning.config(text="")
 
     def load_preset1(self):
-        self.points = [
+        self.points =[
             (0, 0),   # Tip (1m Beam)
             (4, 2),   # User Point 1
             (14, 4),  # User Point 2
@@ -215,13 +226,14 @@ class HullDesigner:
             (85, 5),  # User Point 5
             (100, 3)  # User Point 6
         ]
+        self.selected_point_index = None
         self.var_limit_length.set(100)
         self.recalc_view()
         self.update_stats()
         self.check_slope_warning()
 
     def load_preset2(self):
-        self.points = [
+        self.points =[
             (0, 0),   # Tip (1m Beam)
             (4, 4),   # User Point 1
             (20, 9),  # User Point 2
@@ -232,6 +244,7 @@ class HullDesigner:
             (190, 11),  # User Point 7
             (200, 7)  # User Point 8
         ]
+        self.selected_point_index = None
         self.var_limit_length.set(200)
         self.recalc_view()
         self.update_stats()
@@ -340,9 +353,9 @@ class HullDesigner:
         max_places = max(len(str(self.var_limit_length.get())), len(str(self.offset_y)))
         self.lbl_cursor.config(text=f"Width at Cursor: {width_m:0>{max_places}}m\nLength at Cursor: {length_m:0>{max_places}}m")
 
-        # Render line preview
+        # Render line preview (Disabled when an item is selected to keep screen clean)
         self.canvas.delete("preview")
-        if gz > self.points[-1][0]:
+        if (self.selected_point_index is None or self.selected_point_index == len(self.points) - 1) and gz > self.points[-1][0]:
             real_point_pos = self.to_screen(self.points[-1][1], self.points[-1][0])
             mirror_point_pos = self.to_screen(-self.points[-1][1], self.points[-1][0])
 
@@ -362,9 +375,65 @@ class HullDesigner:
         self.lbl_stats_beam.config(text=f"Beam: {b}m")
 
     def add_point(self, event):
+        self.canvas.focus_set()
         point = self._cursor_to_point(event.x, event.y)
         if not self.points or point[0] > self.points[-1][0]:
             self.points.append(point)
+            self.selected_point_index = len(self.points) - 1
+            self.redraw_shape()
+            self.update_stats()
+            self.check_slope_warning()
+
+    def select_point(self, event):
+        self.canvas.focus_set()
+        
+        for i, (z, x) in enumerate(self.points):
+            sx, sy = self.to_screen(x, z)
+            msx, msy = self.to_screen(-x, z)
+            
+            if (event.x - sx)**2 + (event.y - sy)**2 <= 64 or (event.x - msx)**2 + (event.y - msy)**2 <= 64:
+                self.selected_point_index = i
+                self.redraw_shape()
+                return
+                
+        self.selected_point_index = None
+        self.redraw_shape()
+
+    def move_point(self, event):
+        if self.selected_point_index is None: return
+        
+        i = self.selected_point_index
+        gz, gx = self._cursor_to_point(event.x, event.y)
+
+        # Constraint Rules:
+        if i == 0:
+            # 1. Bow Point strictly locked to centerline
+            gx = 0 
+            # 2. Bow point length can't exceed Point 2's length
+            if len(self.points) > 1:
+                gz = min(gz, self.points[1][0] - 1)
+            gz = max(0, gz)
+        else:
+            # Must be strictly > previous point's length
+            min_z = self.points[i-1][0] + 1
+            gz = max(gz, min_z)
+            
+            # Must be strictly < next point's length (if not the last point)
+            if i < len(self.points) - 1:
+                max_z = self.points[i+1][0] - 1
+                gz = min(gz, max_z)
+                
+        # Apply updated position
+        self.points[i] = (gz, gx)
+        self.redraw_shape()
+        self.update_stats()
+        self.check_slope_warning()
+
+    def delete_selected_point(self, event):
+        # Prevent deletion if nothing is selected or if trying to delete the Bow
+        if self.selected_point_index is not None and self.selected_point_index > 0:
+            self.points.pop(self.selected_point_index)
+            self.selected_point_index = None
             self.redraw_shape()
             self.update_stats()
             self.check_slope_warning()
@@ -372,6 +441,10 @@ class HullDesigner:
     def remove_point(self, event):
         if len(self.points) > 1:
             self.points.pop()
+            # Clear selection if the removed point was the active selection
+            if self.selected_point_index is not None and self.selected_point_index >= len(self.points):
+                self.selected_point_index = None
+                
             self.redraw_shape()
             self.update_stats()
             self.check_slope_warning()
@@ -381,7 +454,7 @@ class HullDesigner:
         self.canvas.delete("points")
         if not self.points: return
 
-        poly_points = []
+        poly_points =[]
         for z, x in self.points:
             sx, sy = self.to_screen(x, z)
             poly_points.append((sx, sy))
@@ -392,17 +465,40 @@ class HullDesigner:
         if len(poly_points) > 2:
             self.canvas.create_polygon(poly_points, fill=THEME_HULL_FILL, outline=THEME_HULL_OUTLINE, width=2, tags="shape")
 
-        for z, x in self.points:
+        # Draw interactive nodes
+        for i, (z, x) in enumerate(self.points):
             rx, ry = self.to_screen(x, z)
-            self.canvas.create_oval(rx-2, ry-2, rx+2, ry+2, fill="#BBB", outline="black", tags="points")
             lx, ly = self.to_screen(-x, z)
-            self.canvas.create_oval(lx-2, ly-2, lx+2, ly+2, fill="#BBB", outline="black", tags="points")
+            
+            # Highlight Color for selected point
+            color = "#FF3333" if i == self.selected_point_index else "#BBB"
+            radius = 4 if i == self.selected_point_index else 3
+            
+            self.canvas.create_oval(rx-radius, ry-radius, rx+radius, ry+radius, fill=color, outline="black", tags="points")
+            if x != 0: # Avoid drawing duplicate circle precisely on the centerline
+                self.canvas.create_oval(lx-radius, ly-radius, lx+radius, ly+radius, fill=color, outline="black", tags="points")
 
     def run_generator(self):
         if len(self.points) < 2: return
+
+        initial_dir = self.var_save_path.get() if self.var_save_path.get() else BASE_DIR
+        
+        file_path = filedialog.asksaveasfilename(
+            title="Save Blueprint As",
+            initialdir=initial_dir,
+            defaultextension=".blueprint",
+            filetypes=[("FTD Blueprint", "*.blueprint"), ("All Files", "*.*")]
+        )
+
+        if not file_path:
+            return
+
+        self.var_save_path.set(os.path.dirname(file_path))
+        self.save_settings()
+
         max_z = self.points[-1][0]
         z_coords = [p[0] for p in self.points]
-        x_coords = [p[1] for p in self.points]
+        x_coords =[p[1] for p in self.points]
         full_z = np.arange(max_z + 1)
         full_x = np.interp(full_z, z_coords, x_coords)
         hull_profile = np.round(full_x).astype(int)
@@ -411,25 +507,13 @@ class HullDesigner:
         undercut = int(self.var_undercut.get())
         do_floor = self.var_floor.get()
         center_offset = int(self.var_limit_width.get())
-        save_path = self.var_save_path.get()
         material = self.var_material.get()
-
-        # --- FIX START ---
-        # 1. Get the thickness from the GUI variable
         thickness = int(self.var_thickness.get())
 
-        # 2. Pass 'thickness' as the last argument
-        generator = BlueprintGenerator(hull_profile, center_offset, height, undercut, do_floor, save_path, material, thickness)
-        # --- FIX END ---
-
+        generator = BlueprintGenerator(hull_profile, center_offset, height, undercut, do_floor, file_path, material, thickness)
         generator.generate()
 
-        if save_path:
-            final_location = os.path.join(save_path, OUTPUT_FILENAME)
-        else:
-            final_location = os.path.join(BASE_DIR, OUTPUT_FILENAME)
-
-        messagebox.showinfo("Success", f"Generated {final_location}")
+        messagebox.showinfo("Success", f"Generated successfully at:\n{file_path}")
 
 
 class BlueprintGenerator:
@@ -441,25 +525,21 @@ class BlueprintGenerator:
         self.do_floor = do_floor
         self.save_path = save_path
         self.material = material
-        self.thickness = thickness # <--- Armor Thickness
-        self.placements = []
+        self.thickness = thickness
+        self.placements =[]
 
-        # Initialize empty dictionaries (No hardcoding!)
         self.beam_guids = {}
         self.slope_guids = {}
         self.offset_guids = {}
         self.load_assets()
 
-
     def load_assets(self):
-        # Reset to ensure clean state
         self.beam_guids = {}
         self.slope_guids = {}
         self.offset_guids = {}
 
-        target_mat = self.material.lower() # alloy, metal, wood, heavy, stone
+        target_mat = self.material.lower() 
 
-        # Load from both JSON files in the BASE_DIR
         loaded_data = {}
         for fname in GUIDMAP_FILES:
             fpath = os.path.join(BASE_DIR, fname)
@@ -474,8 +554,6 @@ class BlueprintGenerator:
         for name, guid in loaded_data.items():
             name_lower = name.lower()
 
-            # --- 1m Block Logic (from standard blocks in guidmap-blocks.json) ---
-            # These usually do NOT have "1m" in the name in the json file provided
             is_1m = False
 
             if target_mat == "alloy":
@@ -483,15 +561,12 @@ class BlueprintGenerator:
             elif target_mat == "heavy":
                 if name_lower == "heavy armour": is_1m = True
             else:
-                # Wood, Metal, Stone follow "{Material} Block" pattern
                 if f"{target_mat} block" in name_lower: is_1m = True
 
             if is_1m:
                 self.beam_guids[1] = guid
                 continue
 
-            # --- 2m, 3m, 4m and Slope/Corner Logic ---
-            # Filter for material presence in name
             check_str = "heavy armour" if target_mat == "heavy" else target_mat
             if check_str not in name_lower: continue
 
@@ -499,20 +574,16 @@ class BlueprintGenerator:
             if "4m" in name_lower: length = 4
             elif "3m" in name_lower: length = 3
             elif "2m" in name_lower: length = 2
-            elif "1m" in name_lower: length = 1 # Handle explicit "1m" in slopes/corners
+            elif "1m" in name_lower: length = 1 
 
             if length == 0: continue
 
-            # Categorize
-            # 1. Beams (Exclude slopes/corners)
             if "beam" in name_lower and "slope" not in name_lower and "corner" not in name_lower:
                 self.beam_guids[length] = guid
 
-            # 2. Slopes
             elif "slope" in name_lower:
                 self.slope_guids[length] = guid
 
-            # 3. Offsets/Corners
             elif "offset" in name_lower and "inverted" not in name_lower:
                 if length not in self.offset_guids:
                     self.offset_guids[length] = {"left": None, "right": None}
@@ -529,27 +600,22 @@ class BlueprintGenerator:
 
         print("Starting Solver...")
 
-        # 1. Generate ONLY the Outer Shell (Layer 0)
-        # We use the standard full profile.
-        self.placements = [] # Clear previous
+        self.placements =[] 
         score, result = self.simulate_hull(0, self.profile, is_inner_layer=False)
 
         if result:
             self.placements.extend(result)
         else:
-            # Fallback
             _, fb = self.simulate_hull(1, self.profile, is_inner_layer=False)
             self.placements.extend(fb)
 
-        # 2. Construct the full hollow shape
         self.fill_stern()
-        self.stack_layers()     # Extrude vertically
-        self.generate_undercut() # Create the bottom curve
+        self.stack_layers()     
+        self.generate_undercut() 
 
         if self.do_floor:
             self.generate_floor()
 
-        # 3. NEW: Apply thickness by filling inwards
         if self.thickness > 1:
             print(f"Applying {self.thickness}m armor thickness...")
             self.apply_armor_thickness()
@@ -574,7 +640,7 @@ class BlueprintGenerator:
     def stack_layers(self):
         if self.height <= 1: return
         base_layer = list(self.placements)
-        self.placements = []
+        self.placements =[]
         for h in range(self.height):
             offset_y = h
             for p in base_layer:
@@ -586,7 +652,6 @@ class BlueprintGenerator:
     def generate_undercut(self):
         if self.undercut <= 0: return
 
-        # Find the bottom-most blocks of the current layer
         if not self.placements: return
         min_y = min(p['pos'][1] for p in self.placements)
         parent_layer = [p for p in self.placements if p['pos'][1] == min_y]
@@ -596,11 +661,10 @@ class BlueprintGenerator:
 
         for u in range(1, self.undercut + 1):
             current_undercut_y = min_y - u
-            new_layer = []
+            new_layer =[]
             occupied_coords = set()
             placed_offsets = []
 
-            # 1. Place Slopes/Offsets (The curved part of the undercut)
             for parent in parent_layer:
                 props = parent['props']
                 if props['type'] == 'beam': continue
@@ -611,8 +675,8 @@ class BlueprintGenerator:
                     rot = parent['rot']
 
                     offset_guid = None
-                    is_left_rot = rot in [ROT_LEFT_IN, ROT_LEFT_STERN, ROT_LEFT_OUT]
-                    is_right_rot = rot in [ROT_RIGHT_IN, ROT_RIGHT_STERN, ROT_RIGHT_OUT]
+                    is_left_rot = rot in[ROT_LEFT_IN, ROT_LEFT_STERN, ROT_LEFT_OUT]
+                    is_right_rot = rot in[ROT_RIGHT_IN, ROT_RIGHT_STERN, ROT_RIGHT_OUT]
 
                     if is_stern:
                         if is_left_rot and length in self.offset_guids: offset_guid = self.offset_guids[length]["left"]
@@ -638,16 +702,13 @@ class BlueprintGenerator:
                     new_layer.append(new_entry)
                     placed_offsets.append(new_entry)
 
-            # 2. Fill Straight Sections (Beams)
-            raw_beam_voxels = []
+            raw_beam_voxels =[]
 
-            # A. Propagate beams downwards (The vertical walls)
             for parent in parent_layer:
                 if parent['props']['type'] == 'beam':
                     length = parent['props']['len']
                     px, py, pz = parent['pos']
 
-                    # Shift based on position relative to center to align nicely
                     beam_z_shift = -1 if pz > ship_center_z else 1
                     shifted_pz = pz + beam_z_shift
 
@@ -658,9 +719,6 @@ class BlueprintGenerator:
                              raw_beam_voxels.append((voxel_x, voxel_z))
                              occupied_coords.add((voxel_x, voxel_z))
 
-            # B. Fill horizontally from offsets (The transition)
-            # IMPORTANT CHANGE: We only fill 1 block inward to maintain shell thickness.
-            # The inner loop will handle the rest.
             for off in placed_offsets:
                 x = off['pos'][0]
                 z_anchor = off['pos'][2]
@@ -675,13 +733,9 @@ class BlueprintGenerator:
 
                 current_z = start_z
 
-                # --- LIMIT FILL TO 1 BLOCK ---
-                # We check if the spot is empty. If so, fill it and stop.
-                # This creates a single-layer shell for the undercut.
                 if (x, current_z) not in occupied_coords:
                     raw_beam_voxels.append((x, current_z))
                     occupied_coords.add((x, current_z))
-                # -----------------------------
 
             optimized_beams = self.optimize_beams(raw_beam_voxels, current_undercut_y)
             new_layer.extend(optimized_beams)
@@ -711,10 +765,10 @@ class BlueprintGenerator:
         min_z = min(z for x, z in occupied)
         max_z = max(z for x, z in occupied)
 
-        raw_floor_voxels = []
+        raw_floor_voxels =[]
 
         for z in range(min_z, max_z + 1):
-            xs_at_z = [x for x, _z in occupied if _z == z]
+            xs_at_z =[x for x, _z in occupied if _z == z]
             if not xs_at_z: continue
 
             min_x = min(xs_at_z)
@@ -734,7 +788,7 @@ class BlueprintGenerator:
             if x not in by_x: by_x[x] = []
             by_x[x].append(z)
 
-        optimized = []
+        optimized =[]
         for x, z_list in by_x.items():
             z_list = sorted(list(set(z_list)))
             if not z_list: continue
@@ -747,7 +801,7 @@ class BlueprintGenerator:
                         current_run.append(z_list[i])
                     else:
                         runs.append(current_run)
-                        current_run = [z_list[i]]
+                        current_run =[z_list[i]]
                 runs.append(current_run)
 
             for run in runs:
@@ -761,11 +815,6 @@ class BlueprintGenerator:
                         if size <= total_len and size in self.beam_guids:
                             chosen = size
                             break
-
-                   # if chosen is None:
-                    #    current_fill_z += 1
-                    #    total_len -= 1
-                    #    continue
 
                     guid = self.beam_guids[chosen]
                     props = {"type": "beam", "len": chosen, "offset": 0, "is_stern": False}
@@ -782,7 +831,7 @@ class BlueprintGenerator:
         return optimized
 
     def simulate_hull(self, forced_1m_zone, target_profile, is_inner_layer=False):
-        temp_placements = []
+        temp_placements =[]
         L = len(target_profile)
         current_z = 0
         current_min_len = 1
@@ -799,11 +848,10 @@ class BlueprintGenerator:
             limit_len = 99
             if current_z < forced_1m_zone: limit_len = 1
 
-            candidates = []
+            candidates =[]
             for l in all_lengths:
                 if l > limit_len: continue
 
-                # If inner layer, ONLY allow Beams (No slopes/offsets)
                 if not is_inner_layer:
                     if l in self.slope_guids:
                         candidates.append({"type": "slope", "len": l, "offset": -1, "is_stern": False, "guid": self.slope_guids[l]})
@@ -823,7 +871,6 @@ class BlueprintGenerator:
                 dist_ideal = dist_current - cand["offset"]
                 error = abs(target_x - dist_ideal)
 
-                # Relax error slightly for beams-only (staircasing)
                 threshold = 1.0
                 if is_inner_layer: threshold = 1.5
 
@@ -836,9 +883,6 @@ class BlueprintGenerator:
 
                 valid_lookahead = True
 
-                # --- FIX: DISABLE LOOKAHEAD FOR INNER LAYERS ---
-                # We only check lookahead for the outer shell.
-                # Inner shells are allowed to be 'blocky' stairs.
                 if b_len > 1 and not is_inner_layer:
                     lookahead_z = current_z + int(b_len * 1.5)
                     if lookahead_z < L:
@@ -846,7 +890,6 @@ class BlueprintGenerator:
                         ratio = (lookahead_z - current_z) / b_len
                         dist_fut_ideal = dist_current - (cand["offset"] * ratio)
                         if abs(future_x - dist_fut_ideal) > threshold: valid_lookahead = False
-                # -----------------------------------------------
 
                 if not valid_lookahead: continue
 
@@ -858,7 +901,7 @@ class BlueprintGenerator:
                 total_penalty += 200
                 current_min_len = 1
 
-                fb_cands = []
+                fb_cands =[]
                 if not is_inner_layer and 1 in self.slope_guids:
                     fb_cands.append({"type": "slope", "len": 1, "offset": -1, "is_stern": False, "guid": self.slope_guids[1]})
                     fb_cands.append({"type": "slope", "len": 1, "offset": 1, "is_stern": True, "guid": self.slope_guids[1]})
@@ -916,7 +959,7 @@ class BlueprintGenerator:
 
         bp["Blueprint"]["SCs"] = []; bp["Blueprint"]["BP1"] = None; bp["Blueprint"]["BP2"] = None
         guid_map = {}; next_id = 1000
-        bp["Blueprint"]["BLP"] = []; bp["Blueprint"]["BLR"] = []; bp["Blueprint"]["BlockIds"] = []; bp["Blueprint"]["BCI"] = []
+        bp["Blueprint"]["BLP"] = []; bp["Blueprint"]["BLR"] = []; bp["Blueprint"]["BlockIds"] = []; bp["Blueprint"]["BCI"] =[]
 
         for p in self.placements:
             pos = p['pos']
@@ -938,19 +981,11 @@ class BlueprintGenerator:
         bp["Blueprint"]["AliveCount"] = count
         bp["SavedTotalBlockCount"] = count
 
-        # --- OUTPUT LOGIC ---
-        if self.save_path:
-            out_file = os.path.join(self.save_path, OUTPUT_FILENAME)
-        else:
-            # Fallback to script directory if no path selected
-            out_file = os.path.join(BASE_DIR, OUTPUT_FILENAME)
+        out_file = self.save_path if self.save_path else os.path.join(BASE_DIR, OUTPUT_FILENAME)
 
         with open(out_file, "w") as f: json.dump(bp, f)
 
-
     def apply_armor_thickness(self):
-        # 1. Map the current ship state
-        # structure: map[y][z] = set of occupied X coordinates
         layer_map = {}
 
         for p in self.placements:
@@ -958,36 +993,20 @@ class BlueprintGenerator:
             if y not in layer_map: layer_map[y] = {}
             if z not in layer_map[y]: layer_map[y][z] = set()
 
-            # Mark occupied voxels
-            # Note: Beams/Slopes might have length > 1, but in this simplified map
-            # we only care about the anchor position for the scan,
-            # OR we need to map the full volume.
-            # Let's map the FULL volume to be safe.
-
             length = p['props']['len']
             is_stern = p['props'].get('is_stern', False)
 
-            # Determine Z-range of this block
             z_start = z
             z_end = z
             if is_stern:
-                z_end = z # Stern builds "forward" from anchor?
-                # Actually, checking simulate_hull:
-                # Stern blocks (is_stern=True) build Z-1, Z-2...
-                # Normal blocks build Z+1, Z+2...
-                # Let's map all occupied Zs
                 for i in range(length): layer_map[y].setdefault(z - i, set()).add(x)
             else:
-                # Normal blocks (beam or slope)
                  for i in range(length): layer_map[y].setdefault(z + i, set()).add(x)
 
-        new_armor_voxels = []
+        new_armor_voxels =[]
 
-        # 2. Scan and Fill
-        # Iterate over every Y level
         for y, z_row in layer_map.items():
 
-            # Determine voxels to fill for this Y level
             voxels_to_fill_at_y = []
 
             for z, x_set in z_row.items():
@@ -1029,4 +1048,3 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = HullDesigner(root)
     root.mainloop()
-    ###
