@@ -38,7 +38,7 @@ THEME_TEXT = "#000000"
 class HullDesigner:
     def __init__(self, root):
         self.root = root
-        self.root.title("FTD Hull Designer (1.3)")
+        self.root.title("FTD Hull Designer (1.4)")
         self.root.configure(bg=THEME_PANEL_BG)
 
         self.points = [(0, 0)]
