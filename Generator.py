@@ -16,6 +16,11 @@ SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
 OUTPUT_FILENAME = "generated_hull.blueprint"
 
+# --- ZOOM SETTINGS ---
+ZOOM_STEP = 10
+ZOOM_MIN = 50
+ZOOM_MAX = 2000
+
 # --- ROTATION SETTINGS ---
 ROT_BEAM      = 0
 ROT_LEFT_IN   = 19
@@ -38,7 +43,7 @@ THEME_TEXT = "#000000"
 class HullDesigner:
     def __init__(self, root):
         self.root = root
-        self.root.title("FTD Hull Designer (1.4)")
+        self.root.title("FTD Hull Designer (1.3)")
         self.root.configure(bg=THEME_PANEL_BG)
 
         self.points = [(0, 0)]
@@ -47,9 +52,9 @@ class HullDesigner:
         # Defaults
         self.var_height = tk.IntVar(value=3)
         self.var_undercut = tk.IntVar(value=5)
-        self.var_floor = tk.BooleanVar(value=True)
+        self.var_floor_thickness = tk.IntVar(value=1)
         self.var_save_path = tk.StringVar(value="")
-        self.var_material = tk.StringVar(value="Alloy")
+        self.var_material = tk.StringVar(value="Metal")
 
         # Logical Dimensions
         self.var_limit_width = tk.IntVar(value=40)
@@ -61,6 +66,10 @@ class HullDesigner:
         self.offset_y = 20
         self.phys_w = 800
         self.phys_h = 600
+
+        self.selected_point_index = None
+        self.pan_start_x = 0             
+        self.pan_start_y = 0             
 
         self.setup_ui()
         self.load_settings()
@@ -121,16 +130,19 @@ class HullDesigner:
         tk.Spinbox(grp_dim, from_=1, to=5, textvariable=self.var_thickness, width=10).pack(pady=2)
 
         # --- OUTPUT PATH ---
-        grp_path = tk.LabelFrame(self.controls, text="Output Location", bg=THEME_PANEL_BG, font=("MS Sans Serif", 9))
-        grp_path.pack(fill=tk.X, pady=5, padx=5)
+        #grp_path = tk.LabelFrame(self.controls, text="Output Location", bg=THEME_PANEL_BG, font=("MS Sans Serif", 9))
+        #grp_path.pack(fill=tk.X, pady=5, padx=5)
+#
+        #self.ent_path = tk.Entry(grp_path, textvariable=self.var_save_path, bg="white", width=15)
+        #self.ent_path.pack(fill=tk.X, padx=5, pady=2)
+#
+        #tk.Button(grp_path, text="Select Folder...", command=self.select_output_folder,
+        #bg=THEME_PANEL_BG, relief=tk.RAISED, bd=2).pack(fill=tk.X, padx=5, pady=5)
+#
+        #tk.Checkbutton(grp_dim, text="Generate Floor", variable=self.var_floor, bg=THEME_PANEL_BG).pack(anchor="w", pady=5)
 
-        self.ent_path = tk.Entry(grp_path, textvariable=self.var_save_path, bg="white", width=15)
-        self.ent_path.pack(fill=tk.X, padx=5, pady=2)
-
-        tk.Button(grp_path, text="Select Folder...", command=self.select_output_folder,
-        bg=THEME_PANEL_BG, relief=tk.RAISED, bd=2).pack(fill=tk.X, padx=5, pady=5)
-
-        tk.Checkbutton(grp_dim, text="Generate Floor", variable=self.var_floor, bg=THEME_PANEL_BG).pack(anchor="w", pady=5)
+        tk.Label(grp_dim, text="Floor Thickness:", **lbl_opts).pack(anchor="w")
+        tk.Spinbox(grp_dim, from_=0, to=10, textvariable=self.var_floor_thickness, width=10).pack(pady=2)
 
         # --- EXPORT ---
         self.btn_export = tk.Button(self.controls, text="EXPORT", command=self.run_generator,
@@ -146,6 +158,8 @@ class HullDesigner:
         )
         self.lbl_info = tk.Label(self.controls, text=instructions, justify=tk.LEFT, bg=THEME_PANEL_BG, fg="#444")
         self.lbl_info.pack(pady=15)
+
+        
 
         # --- WARNING LABEL ---
         self.lbl_warning = tk.Label(self.controls, text="", fg="red", bg=THEME_PANEL_BG, font=("Arial", 10, "bold"))
@@ -168,6 +182,14 @@ class HullDesigner:
         self.canvas.bind("<Button-3>", self.remove_point)
         self.canvas.bind("<Motion>", self.cursor_update)
         
+        # --- NEW: Zoom & Pan Binds ---
+        self.canvas.bind("<MouseWheel>", self.on_zoom) # Windows/Mac
+        self.canvas.bind("<Button-4>", self.on_zoom)   # Linux Scroll Up
+        self.canvas.bind("<Button-5>", self.on_zoom)   # Linux Scroll Down
+        
+        self.canvas.bind("<ButtonPress-2>", self.start_pan) # Middle Click
+        self.canvas.bind("<B2-Motion>", self.do_pan)        # Middle Drag
+
         # Deletion binds (Bound locally to canvas to avoid conflicts with text boxes)
         self.canvas.bind("<Delete>", self.delete_selected_point)
         self.canvas.bind("<BackSpace>", self.delete_selected_point)
@@ -277,8 +299,13 @@ class HullDesigner:
         half_width = int(total_width_blocks / 2)
         self.var_limit_width.set(half_width)
 
-        self.offset_x = 0
-        self.offset_y = 20
+        # Removed the hard reset. Enforce boundary rules instead.
+        self.clamp_view()
+
+        self.draw_grid()
+
+        #self.offset_x = 0
+        #self.offset_y = 20
 
         self.draw_grid()
         self.redraw_shape()
@@ -505,24 +532,83 @@ class HullDesigner:
 
         height = int(self.var_height.get())
         undercut = int(self.var_undercut.get())
-        do_floor = self.var_floor.get()
+        floor_thickness = int(self.var_floor_thickness.get())
         center_offset = int(self.var_limit_width.get())
         material = self.var_material.get()
         thickness = int(self.var_thickness.get())
 
-        generator = BlueprintGenerator(hull_profile, center_offset, height, undercut, do_floor, file_path, material, thickness)
+        # Pass floor_thickness instead of do_floor
+        generator = BlueprintGenerator(hull_profile, center_offset, height, undercut, floor_thickness, file_path, material, thickness)
         generator.generate()
 
         messagebox.showinfo("Success", f"Generated successfully at:\n{file_path}")
 
+    def on_zoom(self, event):
+            try:
+                current_len = int(self.var_limit_length.get())
+            except ValueError:
+                return
+
+            # Determine scroll direction (handles Windows, Mac, and Linux)
+            if hasattr(event, 'num') and event.num in (4, 5):
+                direction = 1 if event.num == 4 else -1
+            else:
+                direction = 1 if event.delta > 0 else -1
+
+            # Scroll Up = Zoom In (Smaller Length). Scroll Down = Zoom Out (Larger Length)
+            new_len = current_len - (direction * ZOOM_STEP)
+
+            if new_len < ZOOM_MIN: new_len = ZOOM_MIN
+            if new_len > ZOOM_MAX: new_len = ZOOM_MAX
+
+            self.var_limit_length.set(new_len)
+            self.recalc_view()
+
+    def start_pan(self, event):
+            self.canvas.focus_set()
+            self.pan_start_x = event.x
+            self.pan_start_y = event.y
+
+    def do_pan(self, event):
+            # Calculate how far the mouse moved
+            dx = event.x - self.pan_start_x
+            dy = event.y - self.pan_start_y
+
+            # Apply to view offsets
+            self.offset_x += dx
+            self.offset_y += dy
+
+            # Reset start position for the next frame of movement
+            self.pan_start_x = event.x
+            self.pan_start_y = event.y
+
+            self.clamp_view()
+            self.draw_grid()
+            self.redraw_shape()
+
+    def clamp_view(self):
+            try:
+                log_len = int(self.var_limit_length.get())
+            except ValueError:
+                return
+
+            # Max limit is 2x the current length converted to pixels
+            max_offset_px = 2 * log_len * self.grid_size
+
+            if self.offset_x > max_offset_px: self.offset_x = max_offset_px
+            elif self.offset_x < -max_offset_px: self.offset_x = -max_offset_px
+
+            if self.offset_y > 20 + max_offset_px: self.offset_y = 20 + max_offset_px
+            elif self.offset_y < 20 - max_offset_px: self.offset_y = 20 - max_offset_px
+
 
 class BlueprintGenerator:
-    def __init__(self, profile, center_offset, height, undercut, do_floor, save_path, material, thickness):
+    def __init__(self, profile, center_offset, height, undercut, floor_thickness, save_path, material, thickness):
         self.profile = profile
         self.center_offset = center_offset
         self.height = height
         self.undercut = undercut
-        self.do_floor = do_floor
+        self.floor_thickness = floor_thickness
         self.save_path = save_path
         self.material = material
         self.thickness = thickness
@@ -613,7 +699,7 @@ class BlueprintGenerator:
         self.stack_layers()     
         self.generate_undercut() 
 
-        if self.do_floor:
+        if self.floor_thickness > 0:
             self.generate_floor()
 
         if self.thickness > 1:
@@ -744,43 +830,43 @@ class BlueprintGenerator:
             parent_layer = new_layer
 
     def generate_floor(self):
-        if not self.placements: return
-
+        # Exit immediately if floor thickness is 0 or if there's no hull generated
+        if self.floor_thickness <= 0 or not self.placements: 
+            return
+        # Find the absolute bottom of the ship
         min_y = min(p['pos'][1] for p in self.placements)
-        occupied = set()
-
-        for p in self.placements:
-            if p['pos'][1] == min_y:
-                length = p['props']['len']
-                px, py, pz = p['pos']
-                is_stern = p['props'].get('is_stern', False)
-
-                if is_stern:
-                    for i in range(length): occupied.add((px, pz - i))
-                else:
-                    for i in range(length): occupied.add((px, pz + i))
-
-        if not occupied: return
-
-        min_z = min(z for x, z in occupied)
-        max_z = max(z for x, z in occupied)
-
-        raw_floor_voxels =[]
-
-        for z in range(min_z, max_z + 1):
-            xs_at_z =[x for x, _z in occupied if _z == z]
-            if not xs_at_z: continue
-
-            min_x = min(xs_at_z)
-            max_x = max(xs_at_z)
-
-            for x in range(min_x + 1, max_x):
-                if (x, z) not in occupied:
-                    raw_floor_voxels.append((x, z))
-                    occupied.add((x, z))
-
-        floor_beams = self.optimize_beams(raw_floor_voxels, min_y)
-        self.placements.extend(floor_beams)
+        # Stack the floor upwards layer by layer
+        for t in range(self.floor_thickness):
+            target_y = min_y + t
+            occupied = set()
+            # 1. Find the outer shell / boundaries at this specific Y level
+            for p in self.placements:
+                if p['pos'][1] == target_y:
+                    length = p['props']['len']
+                    px, py, pz = p['pos']
+                    is_stern = p['props'].get('is_stern', False)
+                    if is_stern:
+                        for i in range(length): occupied.add((px, pz - i))
+                    else:
+                        for i in range(length): occupied.add((px, pz + i))
+            if not occupied: continue
+            min_z = min(z for x, z in occupied)
+            max_z = max(z for x, z in occupied)
+            raw_floor_voxels =[]
+            # 2. Fill the gap between port and starboard
+            for z in range(min_z, max_z + 1):
+                xs_at_z =[x for x, _z in occupied if _z == z]
+                if not xs_at_z: continue
+                min_x = min(xs_at_z)
+                max_x = max(xs_at_z)
+                for x in range(min_x + 1, max_x):
+                    if (x, z) not in occupied:
+                        raw_floor_voxels.append((x, z))
+                        occupied.add((x, z))
+            # 3. Optimize into longer beams and append to hull
+            if raw_floor_voxels:
+                floor_beams = self.optimize_beams(raw_floor_voxels, target_y)
+                self.placements.extend(floor_beams)
 
     def optimize_beams(self, voxels, y_level):
         by_x = {}
@@ -1048,3 +1134,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = HullDesigner(root)
     root.mainloop()
+    ###
