@@ -23,6 +23,7 @@ ZOOM_MAX = 2000
 
 # --- ROTATION SETTINGS ---
 ROT_BEAM      = 0
+ROT_X_AXIS    = 1
 ROT_LEFT_IN   = 19
 ROT_RIGHT_IN  = 17
 ROT_LEFT_OUT  = 18
@@ -55,9 +56,13 @@ class HullDesigner:
         self.pan_start_x = 0              
         self.pan_start_y = 0              
 
+        self._is_syncing = False
+
         # Base Defaults
         self.var_height = tk.IntVar(value=3)
         self.var_undercut = tk.IntVar(value=5)
+        self.var_uc_bow = tk.IntVar(value=1)
+        self.var_uc_stern = tk.IntVar(value=3)
         self.var_floor_thickness = tk.IntVar(value=1)
         self.var_thickness = tk.IntVar(value=2)
         self.var_save_path = tk.StringVar(value="")
@@ -67,11 +72,11 @@ class HullDesigner:
         self.var_centerline_lock = tk.BooleanVar(value=True)
         self.var_comp_mat = tk.StringVar(value="Heavy")
         
-        self.var_b_body_in_r = tk.IntVar(value=3)
+        self.var_b_body_in_d = tk.IntVar(value=7)
         self.var_b_body_thick = tk.IntVar(value=1)
         self.var_b_body_h = tk.IntVar(value=5)
         
-        self.var_b_top_hole_r = tk.IntVar(value=1)
+        self.var_b_top_hole_d = tk.IntVar(value=3)
         self.var_b_top_h = tk.IntVar(value=1)
         
         self.var_b_bot_h = tk.IntVar(value=1)
@@ -143,6 +148,13 @@ class HullDesigner:
         
         tk.Label(grp_dim, text="Undercut Layers:", **lbl_opts).pack(anchor="w")
         tk.Spinbox(grp_dim, from_=0, to=20, textvariable=self.var_undercut, width=10).pack(pady=2)
+
+        f_uc = tk.Frame(grp_dim, bg=THEME_PANEL_BG)
+        f_uc.pack(fill=tk.X, pady=2)
+        tk.Label(f_uc, text="Bow Step:", **lbl_opts).pack(side=tk.LEFT)
+        tk.Spinbox(f_uc, from_=1, to=10, textvariable=self.var_uc_bow, width=4).pack(side=tk.LEFT, padx=2)
+        tk.Label(f_uc, text="Stern Step:", **lbl_opts).pack(side=tk.LEFT)
+        tk.Spinbox(f_uc, from_=1, to=10, textvariable=self.var_uc_stern, width=4).pack(side=tk.LEFT, padx=2)
         
         tk.Label(grp_dim, text="Armor Thickness:", **lbl_opts).pack(anchor="w")
         tk.Spinbox(grp_dim, from_=1, to=5, textvariable=self.var_thickness, width=10).pack(pady=2)
@@ -171,19 +183,27 @@ class HullDesigner:
             tk.Spinbox(f, from_=0, to=max_v, textvariable=var, width=5, command=self.sync_ui_to_barbette).pack(side=tk.RIGHT)
             add_trace(var)
 
+        def make_odd_sb(parent, label_text, var, max_v=51):
+            f = tk.Frame(parent, bg=THEME_PANEL_BG)
+            f.pack(fill=tk.X, pady=1)
+            tk.Label(f, text=label_text, **lbl_opts).pack(side=tk.LEFT)
+            # increment=2 forces the arrows to only jump to odd numbers
+            tk.Spinbox(f, from_=1, to=max_v, increment=2, textvariable=var, width=5, command=self.sync_ui_to_barbette).pack(side=tk.RIGHT)
+            add_trace(var)
+
         g_bot = tk.LabelFrame(self.tab_comp, text="Bottom Cap", **lbl_opts)
         g_bot.pack(fill=tk.X, pady=2)
         make_sb(g_bot, "Thickness/Height:", self.var_b_bot_h)
 
         g_body = tk.LabelFrame(self.tab_comp, text="Main Body", **lbl_opts)
         g_body.pack(fill=tk.X, pady=2)
-        make_sb(g_body, "Inner Radius:", self.var_b_body_in_r)
+        make_odd_sb(g_body, "Inner Diameter:", self.var_b_body_in_d)
         make_sb(g_body, "Wall Thickness:", self.var_b_body_thick)
         make_sb(g_body, "Height:", self.var_b_body_h)
 
         g_top = tk.LabelFrame(self.tab_comp, text="Top Cap", **lbl_opts)
         g_top.pack(fill=tk.X, pady=2)
-        make_sb(g_top, "Hole Radius:", self.var_b_top_hole_r)
+        make_odd_sb(g_top, "Hole Diameter:", self.var_b_top_hole_d)
         make_sb(g_top, "Thickness/Height:", self.var_b_top_h)
 
         g_neck = tk.LabelFrame(self.tab_comp, text="Neck", **lbl_opts)
@@ -424,8 +444,11 @@ class HullDesigner:
             lx, ly = self.to_screen(-b['x'], b['z'])
             
             color = "#FF8800" if i == self.selected_barbette_index else "#AA5500"
-            r_out = (b['body_inner_r'] + b['body_thick']) * self.grid_size
-            r_in = b['body_inner_r'] * self.grid_size
+
+            in_r = (b['body_inner_d'] + 2) // 2
+            
+            r_out = (in_r + b['body_thick']) * self.grid_size
+            r_in = in_r * self.grid_size
             
             # Starboard side (and centerline)
             self.canvas.create_oval(rx-r_out, ry-r_out, rx+r_out, ry+r_out, outline=color, width=2, tags="shape")
@@ -463,7 +486,11 @@ class HullDesigner:
         for i, b in enumerate(self.barbettes):
             sx, sy = self.to_screen(b['x'], b['z'])
             msx, msy = self.to_screen(-b['x'], b['z'])
-            hit_radius = max(3, (b['body_inner_r'] + b['body_thick']) * self.grid_size)
+
+            # --- FIXED: Use diameter and apply true-volume math ---
+            in_r = (b['body_inner_d'] + 2) // 2 
+            hit_radius = max(3, (in_r + b['body_thick']) * self.grid_size)
+            # ------------------------------------------------------
             
             if (event.x - sx)**2 + (event.y - sy)**2 <= hit_radius**2 or \
                (event.x - msx)**2 + (event.y - msy)**2 <= hit_radius**2:
@@ -555,10 +582,10 @@ class HullDesigner:
             'x': gx, 'z': gz,
             'mat': self.var_comp_mat.get(),
             'bottom_cap_h': self.var_b_bot_h.get(),
-            'body_inner_r': self.var_b_body_in_r.get(),
+            'body_inner_d': self.var_b_body_in_d.get() | 1,  # bitwise OR 1 forces odd
             'body_thick': self.var_b_body_thick.get(),
             'body_h': self.var_b_body_h.get(),
-            'top_cap_hole_r': self.var_b_top_hole_r.get(),
+            'top_cap_hole_d': self.var_b_top_hole_d.get() | 1,
             'top_cap_h': self.var_b_top_h.get(),
             'neck_thick': self.var_b_neck_thick.get(),
             'neck_h': self.var_b_neck_h.get()
@@ -571,6 +598,9 @@ class HullDesigner:
         self.redraw_shape()
 
     def sync_ui_to_barbette(self):
+        # --- Abort if updating programmatically ---
+        if getattr(self, '_is_syncing', False): return 
+
         if self.selected_barbette_index is None:
             self.lbl_comp_warn.config(text="Select a Barbette to Edit.")
             return
@@ -580,10 +610,23 @@ class HullDesigner:
         try:
             b['mat'] = self.var_comp_mat.get()
             b['bottom_cap_h'] = int(self.var_b_bot_h.get())
-            b['body_inner_r'] = int(self.var_b_body_in_r.get())
+            
+            # --- FORCE MANUAL INPUT TO BE ODD ---
+            in_d = int(self.var_b_body_in_d.get())
+            if in_d % 2 == 0: 
+                in_d += 1
+                self.var_b_body_in_d.set(in_d) # Instantly correct the UI box
+            b['body_inner_d'] = in_d
+
+            hole_d = int(self.var_b_top_hole_d.get())
+            if hole_d % 2 == 0: 
+                hole_d += 1
+                self.var_b_top_hole_d.set(hole_d)
+            b['top_cap_hole_d'] = hole_d
+            # ------------------------------------
+
             b['body_thick'] = int(self.var_b_body_thick.get())
             b['body_h'] = int(self.var_b_body_h.get())
-            b['top_cap_hole_r'] = int(self.var_b_top_hole_r.get())
             b['top_cap_h'] = int(self.var_b_top_h.get())
             b['neck_thick'] = int(self.var_b_neck_thick.get())
             b['neck_h'] = int(self.var_b_neck_h.get())
@@ -595,15 +638,19 @@ class HullDesigner:
         self.lbl_comp_warn.config(text="Editing Selected Barbette", fg="green")
         b = self.barbettes[self.selected_barbette_index]
         
+        self._is_syncing = True
+        
         self.var_comp_mat.set(b['mat'])
         self.var_b_bot_h.set(b['bottom_cap_h'])
-        self.var_b_body_in_r.set(b['body_inner_r'])
+        self.var_b_body_in_d.set(b['body_inner_d'])
         self.var_b_body_thick.set(b['body_thick'])
         self.var_b_body_h.set(b['body_h'])
-        self.var_b_top_hole_r.set(b['top_cap_hole_r'])
+        self.var_b_top_hole_d.set(b['top_cap_hole_d'])
         self.var_b_top_h.set(b['top_cap_h'])
         self.var_b_neck_thick.set(b['neck_thick'])
         self.var_b_neck_h.set(b['neck_h'])
+
+        self._is_syncing = False
 
     # --- EXPORT PIPELINE ---
     def run_generator(self):
@@ -633,6 +680,8 @@ class HullDesigner:
             center_offset=int(self.var_limit_width.get()),
             height=int(self.var_height.get()),
             undercut=int(self.var_undercut.get()),
+            uc_bow=int(self.var_uc_bow.get()),
+            uc_stern=int(self.var_uc_stern.get()), 
             floor_thickness=int(self.var_floor_thickness.get()),
             save_path=file_path,
             hull_material=self.var_material.get(),
@@ -644,11 +693,13 @@ class HullDesigner:
 
 
 class BlueprintGenerator:
-    def __init__(self, profile, center_offset, height, undercut, floor_thickness, save_path, hull_material, thickness, barbettes):
+    def __init__(self, profile, center_offset, height, undercut, uc_bow, uc_stern, floor_thickness, save_path, hull_material, thickness, barbettes):
         self.profile = profile
         self.center_offset = center_offset
         self.height = height
         self.undercut = undercut
+        self.uc_bow = uc_bow
+        self.uc_stern = uc_stern
         self.floor_thickness = floor_thickness
         self.save_path = save_path
         self.hull_material = hull_material
@@ -759,7 +810,7 @@ class BlueprintGenerator:
     def generate_undercut(self, guids):
         if self.undercut <= 0 or not self.placements: return
         min_y = min(p['pos'][1] for p in self.placements)
-        parent_layer = [p for p in self.placements if p['pos'][1] == min_y]
+        parent_layer =[p for p in self.placements if p['pos'][1] == min_y]
         ship_center_z = max((p['pos'][2] for p in parent_layer), default=0) / 2
 
         for u in range(1, self.undercut + 1):
@@ -778,7 +829,7 @@ class BlueprintGenerator:
                 offset_guid = None
                 
                 is_left_rot = rot in[ROT_LEFT_IN, ROT_LEFT_STERN, ROT_LEFT_OUT]
-                is_right_rot = rot in [ROT_RIGHT_IN, ROT_RIGHT_STERN, ROT_RIGHT_OUT]
+                is_right_rot = rot in[ROT_RIGHT_IN, ROT_RIGHT_STERN, ROT_RIGHT_OUT]
 
                 target_dict = guids['offset'].get(length)
                 if target_dict:
@@ -789,7 +840,10 @@ class BlueprintGenerator:
 
                 if not offset_guid: continue
 
-                z_shift = 1 if is_stern else -1
+                # Determine the custom step steepness
+                step_size = self.uc_stern if is_stern else self.uc_bow
+                z_shift = step_size if is_stern else -step_size
+
                 x, y, z = parent['pos']
                 new_pos = (x, current_undercut_y, z + z_shift)
 
@@ -803,7 +857,11 @@ class BlueprintGenerator:
             for parent in parent_layer:
                 if parent['props']['type'] == 'beam':
                     length, px, py, pz = parent['props']['len'], *parent['pos']
-                    shifted_pz = pz + (-1 if pz > ship_center_z else 1)
+                    
+                    # Shrink straight beams forward/backward based on which half they are on
+                    beam_z_shift = -self.uc_bow if pz > ship_center_z else self.uc_stern
+                    shifted_pz = pz + beam_z_shift
+                    
                     for z_offset in range(length):
                         if (px, shifted_pz + z_offset) not in occupied_coords:
                              raw_beam_voxels.append((px, shifted_pz + z_offset))
@@ -811,11 +869,17 @@ class BlueprintGenerator:
 
             for off in placed_offsets:
                 x, z_anchor = off['pos'][0], off['pos'][2]
-                current_z = z_anchor + 1 if off['props']['is_stern'] else z_anchor - 1
-                if (x, current_z) not in occupied_coords:
-                    raw_beam_voxels.append((x, current_z))
-                    occupied_coords.add((x, current_z))
+                is_stern = off['props']['is_stern']
+                step_size = self.uc_stern if is_stern else self.uc_bow
+                
+                # Dynamically fill the entire gap between the old layer and the custom step
+                for d in range(1, step_size + 1):
+                    current_z = z_anchor + d if is_stern else z_anchor - d
+                    if (x, current_z) not in occupied_coords:
+                        raw_beam_voxels.append((x, current_z))
+                        occupied_coords.add((x, current_z))
 
+            # The 2D Greedy Mesher will automatically combine our huge gaps into 2m, 3m, or 4m beams!
             new_layer.extend(self.optimize_beams(raw_beam_voxels, current_undercut_y, guids))
             self.placements.extend(new_layer)
             parent_layer = new_layer
@@ -904,15 +968,20 @@ class BlueprintGenerator:
             c_guids = self.get_guids(b['mat'])
             bx, bz = b['x'], b['z']
             
+            # --- CONVERT UI DIAMETERS TO GENERATOR RADII ---
+            body_inner_r = (b['body_inner_d'] + 2) // 2
+            top_cap_hole_r = (b['top_cap_hole_d'] + 2) // 2
+            # -----------------------------------------------
+            
             # Use symmetry to build the mirror simultaneously if not centered
-            centers = [(bx, bz)]
+            centers =[(bx, bz)]
             if bx != 0: centers.append((-bx, bz))
             
             for cx, cz in centers:
                 cur_y = base_y
                 raw_voxels =[]
                 
-                body_outer_r = b['body_inner_r'] + b['body_thick']
+                body_outer_r = body_inner_r + b['body_thick']
 
                 # Bottom Cap
                 for y in range(cur_y, cur_y + b['bottom_cap_h']):
@@ -921,17 +990,17 @@ class BlueprintGenerator:
                 
                 # Body
                 for y in range(cur_y, cur_y + b['body_h']):
-                    raw_voxels.extend(self.get_ring_voxels(cx, y, cz, b['body_inner_r'], body_outer_r))
+                    raw_voxels.extend(self.get_ring_voxels(cx, y, cz, body_inner_r, body_outer_r))
                 cur_y += b['body_h']
                 
                 # Top Cap
                 for y in range(cur_y, cur_y + b['top_cap_h']):
-                    raw_voxels.extend(self.get_ring_voxels(cx, y, cz, b['top_cap_hole_r'], body_outer_r))
+                    raw_voxels.extend(self.get_ring_voxels(cx, y, cz, top_cap_hole_r, body_outer_r))
                 cur_y += b['top_cap_h']
                 
                 # Neck
                 for y in range(cur_y, cur_y + b['neck_h']):
-                    raw_voxels.extend(self.get_ring_voxels(cx, y, cz, b['top_cap_hole_r'], b['top_cap_hole_r'] + b['neck_thick']))
+                    raw_voxels.extend(self.get_ring_voxels(cx, y, cz, top_cap_hole_r, top_cap_hole_r + b['neck_thick']))
                     
                 # 3. Filter against Hull Priority
                 filtered =[(x,y,z) for x,y,z in set(raw_voxels) if (x,y,z) not in occupied]
@@ -947,33 +1016,73 @@ class BlueprintGenerator:
                         self.placements.extend(self.optimize_beams(xz_list, y, c_guids))
 
     def optimize_beams(self, voxels, y_level, guids):
-        by_x = {}
-        for x, z in voxels: by_x.setdefault(x, []).append(z)
-
         optimized =[]
-        for x, z_list in by_x.items():
-            z_list = sorted(list(set(z_list)))
-            if not z_list: continue
+        
+        # 1. Split the voxels into Starboard and Centerline 
+        # (We completely ignore Port, because we will perfectly mirror Starboard)
+        stbd_voxels = set((x, z) for x, z in voxels if x > 0)
+        center_voxels = set((x, z) for x, z in voxels if x == 0)
 
-            runs, current_run = [], [z_list[0]]
-            for i in range(1, len(z_list)):
-                if z_list[i] == z_list[i-1] + 1: current_run.append(z_list[i])
+        # Helper function to run the greedy mesher on a specific zone
+        def mesh_region(voxel_set, allow_x_axis):
+            region_optimized =[]
+            unprocessed = set(voxel_set)
+            sorted_voxels = sorted(list(unprocessed))
+
+            for sx, sz in sorted_voxels:
+                if (sx, sz) not in unprocessed: continue
+
+                # Check max length Forward (+Z)
+                len_z = 1
+                while len_z < 4 and (sx, sz + len_z) in unprocessed: len_z += 1
+
+                # Check max length Right (+X)
+                len_x = 1
+                if allow_x_axis:
+                    while len_x < 4 and (sx + len_x, sz) in unprocessed: len_x += 1
+
+                if len_x > len_z:
+                    chosen_len = len_x
+                    while chosen_len not in guids['beam'] and chosen_len > 1: chosen_len -= 1
+                    rot = ROT_X_AXIS
+                    for i in range(chosen_len): unprocessed.remove((sx + i, sz))
                 else:
-                    runs.append(current_run)
-                    current_run =[z_list[i]]
-            runs.append(current_run)
+                    chosen_len = len_z
+                    while chosen_len not in guids['beam'] and chosen_len > 1: chosen_len -= 1
+                    rot = ROT_BEAM
+                    for i in range(chosen_len): unprocessed.remove((sx, sz + i))
+                
+                region_optimized.append({
+                    'pos': (sx, y_level, sz), 'rot': rot,
+                    'guid': guids['beam'].get(chosen_len, guids['beam'].get(1)),
+                    'props': {"type": "beam", "len": chosen_len, "is_stern": False}
+                })
+            return region_optimized
 
-            for run in runs:
-                current_fill_z, total_len = run[0], len(run)
-                while total_len > 0:
-                    chosen = next((size for size in[4, 3, 2, 1] if size <= total_len and size in guids['beam']), 1)
-                    optimized.append({
-                        'pos': (x, y_level, current_fill_z), 'rot': ROT_BEAM,
-                        'guid': guids['beam'].get(chosen, guids['beam'].get(1)),
-                        'props': {"type": "beam", "len": chosen, "is_stern": False}
-                    })
-                    current_fill_z += chosen
-                    total_len -= chosen
+        # 2. Process Starboard and Mirror to Port
+        stbd_blocks = mesh_region(stbd_voxels, allow_x_axis=True)
+        for b in stbd_blocks:
+            optimized.append(b) # Add original Starboard block
+            
+            # Create exact Port mirror
+            bx, by, bz = b['pos']
+            blen = b['props']['len']
+            
+            if b['rot'] == ROT_X_AXIS:
+                # If block is sideways, the mirror's anchor shifts left by its length
+                port_x = -bx - blen + 1
+            else:
+                # If block is forward, the anchor is just flipped
+                port_x = -bx
+                
+            port_b = copy.deepcopy(b)
+            port_b['pos'] = (port_x, by, bz)
+            optimized.append(port_b)
+
+        # 3. Process Centerline (Forced to Z-Axis only to prevent crossing the center)
+        center_blocks = mesh_region(center_voxels, allow_x_axis=False)
+        optimized.extend(center_blocks)
+
         return optimized
 
     def simulate_hull(self, forced_1m_zone, target_profile, is_inner_layer, guids):
