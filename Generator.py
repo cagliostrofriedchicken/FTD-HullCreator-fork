@@ -64,9 +64,8 @@ class HullDesigner:
         self.var_uc_bow = tk.IntVar(value=1)
         self.var_uc_stern = tk.IntVar(value=3)
         self.var_floor_thickness = tk.IntVar(value=1)
-        self.var_thickness = tk.IntVar(value=2)
         self.var_save_path = tk.StringVar(value="")
-        self.var_material = tk.StringVar(value="Alloy")
+        self.armor_layers =[]
 
         # Compartment Defaults
         self.var_centerline_lock = tk.BooleanVar(value=True)
@@ -140,8 +139,6 @@ class HullDesigner:
 
         grp_dim = tk.LabelFrame(self.tab_hull, text="Generator Settings", **lbl_opts)
         grp_dim.pack(fill=tk.X, pady=5)
-        tk.Label(grp_dim, text="Material:", **lbl_opts).pack(anchor="w")
-        ttk.Combobox(grp_dim, textvariable=self.var_material, values=mat_options, state="readonly", width=12).pack(pady=2)
         
         tk.Label(grp_dim, text="Deck Height:", **lbl_opts).pack(anchor="w")
         tk.Spinbox(grp_dim, from_=1, to=50, textvariable=self.var_height, width=10).pack(pady=2)
@@ -156,11 +153,18 @@ class HullDesigner:
         tk.Label(f_uc, text="Stern Step:", **lbl_opts).pack(side=tk.LEFT)
         tk.Spinbox(f_uc, from_=1, to=10, textvariable=self.var_uc_stern, width=4).pack(side=tk.LEFT, padx=2)
         
-        tk.Label(grp_dim, text="Armor Thickness:", **lbl_opts).pack(anchor="w")
-        tk.Spinbox(grp_dim, from_=1, to=5, textvariable=self.var_thickness, width=10).pack(pady=2)
         
         tk.Label(grp_dim, text="Floor Thickness (0 = None):", **lbl_opts).pack(anchor="w")
         tk.Spinbox(grp_dim, from_=0, to=10, textvariable=self.var_floor_thickness, width=10).pack(pady=2)
+
+        self.grp_armor = tk.LabelFrame(self.tab_hull, text="Armor Layout", **lbl_opts)
+        self.grp_armor.pack(fill=tk.X, pady=5)
+
+        self.armor_list_frame = tk.Frame(self.grp_armor, bg=THEME_PANEL_BG)
+        self.armor_list_frame.pack(fill=tk.X, pady=2)
+
+        tk.Button(self.grp_armor, text="Add Layer (+)", command=self.add_armor_layer, bg=THEME_PANEL_BG).pack(pady=2)
+        self.add_armor_layer("Alloy", 1)
 
         # ==========================================
         # TAB 2: COMPARTMENTS (BARBETTES)
@@ -675,6 +679,8 @@ class HullDesigner:
         full_x = np.interp(full_z, z_coords, x_coords)
         hull_profile = np.round(full_x).astype(int)
 
+        armor_profile = [{'mat': layer['mat'].get(), 'thick': int(layer['thick'].get())} for layer in self.armor_layers]
+
         gen = BlueprintGenerator(
             profile=hull_profile,
             center_offset=int(self.var_limit_width.get()),
@@ -684,16 +690,43 @@ class HullDesigner:
             uc_stern=int(self.var_uc_stern.get()), 
             floor_thickness=int(self.var_floor_thickness.get()),
             save_path=file_path,
-            hull_material=self.var_material.get(),
-            thickness=int(self.var_thickness.get()),
+            armor_profile=armor_profile, # <--- NEW
             barbettes=self.barbettes
         )
+
         gen.generate()
         messagebox.showinfo("Success", f"Generated successfully at:\n{file_path}")
 
+    def add_armor_layer(self, default_mat="Alloy", default_thick=1):
+        mat_var = tk.StringVar(value=default_mat)
+        thick_var = tk.IntVar(value=default_thick)
+
+        row = tk.Frame(self.armor_list_frame, bg=THEME_PANEL_BG)
+        row.pack(fill=tk.X, pady=1)
+
+        tk.Label(row, text="Mat:", bg=THEME_PANEL_BG, fg=THEME_TEXT, font=("MS Sans Serif", 9)).pack(side=tk.LEFT)
+        cb = ttk.Combobox(row, textvariable=mat_var, values=["Alloy", "Metal", "Wood", "Heavy", "Stone"], state="readonly", width=7)
+        cb.pack(side=tk.LEFT, padx=2)
+
+        tk.Label(row, text="Width:", bg=THEME_PANEL_BG, fg=THEME_TEXT, font=("MS Sans Serif", 9)).pack(side=tk.LEFT)
+        sb = tk.Spinbox(row, from_=1, to=10, textvariable=thick_var, width=3)
+        sb.pack(side=tk.LEFT, padx=2)
+
+        layer_data = {'mat': mat_var, 'thick': thick_var, 'frame': row}
+        
+        btn_rm = tk.Button(row, text="X", fg="red", command=lambda: self.remove_armor_layer(layer_data))
+        btn_rm.pack(side=tk.RIGHT, padx=2)
+
+        self.armor_layers.append(layer_data)
+
+    def remove_armor_layer(self, layer_data):
+        if len(self.armor_layers) <= 1:
+            return # Prevent removing the very last layer
+        layer_data['frame'].destroy()
+        self.armor_layers.remove(layer_data)
 
 class BlueprintGenerator:
-    def __init__(self, profile, center_offset, height, undercut, uc_bow, uc_stern, floor_thickness, save_path, hull_material, thickness, barbettes):
+    def __init__(self, profile, center_offset, height, undercut, uc_bow, uc_stern, floor_thickness, save_path, armor_profile, barbettes):
         self.profile = profile
         self.center_offset = center_offset
         self.height = height
@@ -702,8 +735,7 @@ class BlueprintGenerator:
         self.uc_stern = uc_stern
         self.floor_thickness = floor_thickness
         self.save_path = save_path
-        self.hull_material = hull_material
-        self.thickness = thickness
+        self.armor_profile = armor_profile
         self.barbettes = barbettes
         
         self.placements =[]
@@ -757,9 +789,12 @@ class BlueprintGenerator:
         return self.mats.get(mat_name.lower(), self.mats["alloy"])
 
     def generate(self):
-        h_guids = self.get_guids(self.hull_material)
+        # The outermost layer dictates the primary structural material
+        primary_mat = self.armor_profile[0]['mat']
+        h_guids = self.get_guids(primary_mat)
+        
         if 1 not in h_guids['beam']:
-             messagebox.showerror("Error", f"Missing 1m ID for {self.hull_material}")
+             messagebox.showerror("Error", f"Missing 1m ID for {primary_mat}")
              return
 
         print("Generating Hull Shell...")
@@ -775,14 +810,13 @@ class BlueprintGenerator:
         self.stack_layers()     
         self.generate_undercut(h_guids) 
         self.generate_floor(h_guids)
-
-        if self.thickness > 1:
-            print(f"Applying {self.thickness}m armor thickness...")
-            self.apply_armor_thickness(h_guids)
             
         if self.barbettes:
             print("Carving and inserting Compartments...")
             self.generate_barbettes()
+
+        print("Applying composite armor thickness...")
+        self.apply_armor_thickness()
 
         self.save_to_blueprint()
 
@@ -911,7 +945,16 @@ class BlueprintGenerator:
 
             self.placements.extend(self.optimize_beams(raw_floor_voxels, target_y, guids))
 
-    def apply_armor_thickness(self, guids):
+    def apply_armor_thickness(self):
+        # Map depth to material. E.g., Metal(2) + Alloy(1) -> ['Metal', 'Metal', 'Alloy']
+        depth_materials = []
+        for layer in self.armor_profile:
+            depth_materials.extend([layer['mat']] * layer['thick'])
+
+        total_thickness = len(depth_materials)
+        if total_thickness <= 1: 
+            return # Ship is only 1 block thick (the outer shell)
+
         layer_map = {}
         for p in self.placements:
             x, y, z = p['pos']
@@ -924,21 +967,32 @@ class BlueprintGenerator:
 
         new_armor_voxels =[]
         for y, z_row in layer_map.items():
-            voxels_to_fill =[]
+            voxels_by_mat = {}
+
             for z, x_set in z_row.items():
                 if not x_set: continue
                 max_x, min_x = max(x_set), min(x_set)
 
-                for t in range(1, self.thickness):
-                    if max_x - t > 0 and (max_x - t) not in x_set:
-                        voxels_to_fill.append((max_x - t, z))
-                        x_set.add(max_x - t)
-                for t in range(1, self.thickness):
-                    if min_x + t < 0 and (min_x + t) not in x_set:
-                        voxels_to_fill.append((min_x + t, z))
-                        x_set.add(min_x + t)
+                for depth in range(1, total_thickness):
+                    mat = depth_materials[depth]
+                    if mat not in voxels_by_mat: voxels_by_mat[mat] =[]
 
-            if voxels_to_fill: new_armor_voxels.extend(self.optimize_beams(voxels_to_fill, y, guids))
+                    # Thickening Starboard
+                    if max_x - depth > 0 and (max_x - depth) not in x_set:
+                        voxels_by_mat[mat].append((max_x - depth, z))
+                        x_set.add(max_x - depth)
+                        
+                    # Thickening Port
+                    if min_x + depth < 0 and (min_x + depth) not in x_set:
+                        voxels_by_mat[mat].append((min_x + depth, z))
+                        x_set.add(min_x + depth)
+
+            # Optimize and place each material separately for this Y level
+            for mat, voxels in voxels_by_mat.items():
+                if voxels:
+                    mat_guids = self.get_guids(mat)
+                    new_armor_voxels.extend(self.optimize_beams(voxels, y, mat_guids))
+
         self.placements.extend(new_armor_voxels)
 
     # --- COMPARTMENT GENERATOR ---
