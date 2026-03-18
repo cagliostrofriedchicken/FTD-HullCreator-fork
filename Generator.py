@@ -1018,9 +1018,13 @@ class BlueprintGenerator:
         min_y = min(p['pos'][1] for p in self.placements) if self.placements else 10
         base_y = min_y + self.floor_thickness
         
+        L = len(self.profile)
+        
         for b in self.barbettes:
             c_guids = self.get_guids(b['mat'])
-            bx, bz = b['x'], b['z']
+            
+            bx = b['x']
+            bz = L - 1 - b['z']
             
             # --- CONVERT UI DIAMETERS TO GENERATOR RADII ---
             body_inner_r = (b['body_inner_d'] + 2) // 2
